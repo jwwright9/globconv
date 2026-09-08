@@ -1,0 +1,12 @@
+[package]
+name = "globconv"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Convert between shell glob patterns and regular expressions"
+
+[[bin]]
+name = "globconv"
+path = "src/main.rs"
+
+[dependencies]
