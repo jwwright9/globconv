@@ -22,13 +22,16 @@ Convert a glob to its equivalent regex:
 
 ```
 $ globconv to-regex '*.txt'
-^.*\.txt$
+^[^/]*\.txt$
 
 $ globconv to-regex 'report-[0-9][0-9].csv'
 ^report-[0-9][0-9]\.csv$
 
 $ globconv to-regex 'backup-[!0-9]*.tar.gz'
-^backup-[^0-9].*\.tar\.gz$
+^backup-[^0-9][^/]*\.tar\.gz$
+
+$ globconv to-regex 'logs/**/*.log'
+^logs/.*/[^/]*\.log$
 ```
 
 Convert a regex back to a glob, when the regex is simple enough to
@@ -52,18 +55,18 @@ and the tool says so instead of returning something approximate.
 
 Glob syntax understood by `to-regex`:
 
-- `*` — any run of characters, including zero
+- `*` — any run of characters except `/`, including zero
+- `**` — any run of characters, including `/`, for matching across
+  directory separators (`logs/**/*.log` matches `logs/2024/01/a.log`)
 - `?` — any single character
 - `[abc]`, `[a-z]`, `[!abc]` — character classes and negation
 - `\x` — escape a character so it's matched literally
 
-`**` is currently treated the same as `*`. Giving it the usual
-"match across directory separators" meaning is on the list, see
-below.
+`to-glob` recognizes the regex these compile to (`[^/]*` and `.*`)
+and folds them back into `*` and `**` respectively.
 
 ## Roadmap
 
-- distinguish `**` from `*` for path-aware matching
 - read patterns from stdin, one per line, for batch conversion
 - a `--test <path>` flag to check a glob/regex against a sample string
 - brace expansion (`{a,b,c}`)

@@ -18,18 +18,28 @@ fn regex_escape(c: char) -> String {
 
 /// Translate a glob pattern into an anchored regex.
 ///
-/// Supported syntax: `*` (any run of characters, including none),
-/// `?` (any single character), `[abc]` / `[!abc]` character classes,
-/// and `\` to escape the next character literally. `**` is treated
-/// the same as `*` — this tool does not give it special recursive
-/// meaning yet.
+/// Supported syntax: `*` (any run of characters except `/`), `**` (any
+/// run of characters, including `/`, for matching across path
+/// segments), `?` (any single character), `[abc]` / `[!abc]` character
+/// classes, and `\` to escape the next character literally.
 pub fn glob_to_regex(pattern: &str) -> String {
     let chars: Vec<char> = pattern.chars().collect();
     let mut out = String::from("^");
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
-            '*' => out.push_str(".*"),
+            '*' => {
+                let mut j = i;
+                while j < chars.len() && chars[j] == '*' {
+                    j += 1;
+                }
+                if j - i >= 2 {
+                    out.push_str(".*");
+                } else {
+                    out.push_str("[^/]*");
+                }
+                i = j - 1;
+            }
             '?' => out.push('.'),
             '[' => {
                 let mut j = i + 1;
@@ -83,10 +93,11 @@ pub fn glob_to_regex(pattern: &str) -> String {
 /// Translate a regex back into a glob pattern, when possible.
 ///
 /// Only the subset of regex syntax that glob can express is accepted:
-/// `.` and `.*`, character classes `[...]` / `[^...]`, escaped
-/// literals, and plain characters. Quantifiers, groups, alternation
-/// and anchors other than a leading `^` / trailing `$` are rejected
-/// rather than approximated.
+/// `.` and `.*` (mapped to `**`, since a bare `*` in glob already
+/// excludes `/`), `[^/]*` (mapped back to `*`), character classes
+/// `[...]` / `[^...]`, escaped literals, and plain characters.
+/// Quantifiers, groups, alternation and anchors other than a leading
+/// `^` / trailing `$` are rejected rather than approximated.
 pub fn regex_to_glob(pattern: &str) -> Result<String, String> {
     let mut p = pattern;
     if let Some(stripped) = p.strip_prefix('^') {
@@ -102,7 +113,7 @@ pub fn regex_to_glob(pattern: &str) -> Result<String, String> {
         match chars[i] {
             '.' => {
                 if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    out.push('*');
+                    out.push_str("**");
                     i += 1;
                 } else {
                     out.push('?');
@@ -133,15 +144,24 @@ pub fn regex_to_glob(pattern: &str) -> Result<String, String> {
                 if j >= chars.len() {
                     return Err("unterminated character class".to_string());
                 }
-                out.push('[');
-                if negate {
-                    out.push('!');
+                let followed_by_star = j + 1 < chars.len() && chars[j + 1] == '*';
+                if negate && j - start == 1 && chars[start] == '/' && followed_by_star {
+                    // [^/]* is what *-in-a-glob compiles to; fold it back.
+                    out.push('*');
+                    i = j + 1;
+                } else if followed_by_star {
+                    return Err("no glob equivalent for a quantified character class".to_string());
+                } else {
+                    out.push('[');
+                    if negate {
+                        out.push('!');
+                    }
+                    for &cc in &chars[start..j] {
+                        out.push(cc);
+                    }
+                    out.push(']');
+                    i = j;
                 }
-                for &cc in &chars[start..j] {
-                    out.push(cc);
-                }
-                out.push(']');
-                i = j;
             }
             '*' | '+' | '?' | '(' | ')' | '{' | '}' | '|' | '^' | '$' => {
                 return Err(format!("no glob equivalent for '{}'", chars[i]));
@@ -164,7 +184,17 @@ mod tests {
 
     #[test]
     fn simple_star() {
-        assert_eq!(glob_to_regex("*.txt"), "^.*\\.txt$");
+        assert_eq!(glob_to_regex("*.txt"), "^[^/]*\\.txt$");
+    }
+
+    #[test]
+    fn globstar_crosses_slash() {
+        assert_eq!(glob_to_regex("**/*.log"), "^.*/[^/]*\\.log$");
+    }
+
+    #[test]
+    fn triple_star_is_globstar() {
+        assert_eq!(glob_to_regex("***"), "^.*$");
     }
 
     #[test]
@@ -189,9 +219,20 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_globstar() {
+        let re = glob_to_regex("a/**/b.txt");
+        assert_eq!(regex_to_glob(&re).unwrap(), "a/**/b.txt");
+    }
+
+    #[test]
     fn roundtrip_class() {
         let re = glob_to_regex("[a-z].log");
-        assert_eq!(regex_to_glob(&re).unwrap(), "[a-z]?log");
+        assert_eq!(regex_to_glob(&re).unwrap(), "[a-z].log");
+    }
+
+    #[test]
+    fn rejects_quantified_class() {
+        assert!(regex_to_glob("^[abc]*$").is_err());
     }
 
     #[test]
