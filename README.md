@@ -51,6 +51,22 @@ nothing else — no repetition counts, no groups, no alternation. If a
 regex uses one of those, there is no glob that means the same thing,
 and the tool says so instead of returning something approximate.
 
+## Batch mode
+
+Leave off the pattern argument and it reads patterns from stdin, one
+per line, converting each and printing the result on its own line of
+output:
+
+```
+$ printf '*.txt\nlogs/**/*.log\n' | globconv to-regex
+^[^/]*\.txt$
+^logs/.*/[^/]*\.log$
+```
+
+If any line fails to convert (relevant to `to-glob`), the error goes
+to stderr with the offending pattern, the rest of the batch keeps
+going, and the process exits non-zero once stdin is exhausted.
+
 ## What's supported
 
 Glob syntax understood by `to-regex`:
@@ -67,9 +83,9 @@ and folds them back into `*` and `**` respectively.
 
 ## Roadmap
 
-- read patterns from stdin, one per line, for batch conversion
 - a `--test <path>` flag to check a glob/regex against a sample string
 - brace expansion (`{a,b,c}`)
+- integration tests that exercise the built binary directly
 
 ## License
 
