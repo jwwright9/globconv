@@ -178,6 +178,161 @@ pub fn regex_to_glob(pattern: &str) -> Result<String, String> {
     Ok(out)
 }
 
+enum GlobToken {
+    Star,
+    GlobStar,
+    AnyChar,
+    Class { negate: bool, items: String },
+    Literal(char),
+}
+
+fn parse_glob(pattern: &str) -> Vec<GlobToken> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                let mut j = i;
+                while j < chars.len() && chars[j] == '*' {
+                    j += 1;
+                }
+                if j - i >= 2 {
+                    tokens.push(GlobToken::GlobStar);
+                } else {
+                    tokens.push(GlobToken::Star);
+                }
+                i = j;
+                continue;
+            }
+            '?' => tokens.push(GlobToken::AnyChar),
+            '[' => {
+                let mut j = i + 1;
+                let mut negate = false;
+                if j < chars.len() && (chars[j] == '!' || chars[j] == '^') {
+                    negate = true;
+                    j += 1;
+                }
+                let class_start = j;
+                if j < chars.len() && chars[j] == ']' {
+                    j += 1;
+                }
+                while j < chars.len() && chars[j] != ']' {
+                    j += 1;
+                }
+                if j < chars.len() {
+                    tokens.push(GlobToken::Class {
+                        negate,
+                        items: chars[class_start..j].iter().collect(),
+                    });
+                    i = j;
+                } else {
+                    // unterminated class: treat the bracket as a literal,
+                    // matching how glob_to_regex handles the same case.
+                    tokens.push(GlobToken::Literal('['));
+                }
+            }
+            '\\' => {
+                if i + 1 < chars.len() {
+                    i += 1;
+                    tokens.push(GlobToken::Literal(chars[i]));
+                } else {
+                    tokens.push(GlobToken::Literal('\\'));
+                }
+            }
+            c => tokens.push(GlobToken::Literal(c)),
+        }
+        i += 1;
+    }
+    tokens
+}
+
+fn class_matches(items: &str, c: char) -> bool {
+    let chars: Vec<char> = items.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 2 < chars.len() && chars[i + 1] == '-' {
+            if c >= chars[i] && c <= chars[i + 2] {
+                return true;
+            }
+            i += 3;
+        } else {
+            if chars[i] == c {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
+fn char_matches(token: &GlobToken, c: char) -> bool {
+    match token {
+        GlobToken::AnyChar => true,
+        GlobToken::Literal(l) => *l == c,
+        GlobToken::Class { negate, items } => class_matches(items, c) != *negate,
+        GlobToken::Star | GlobToken::GlobStar => unreachable!(),
+    }
+}
+
+fn star_accepts(token: &GlobToken, c: char) -> bool {
+    match token {
+        GlobToken::Star => c != '/',
+        GlobToken::GlobStar => true,
+        _ => unreachable!(),
+    }
+}
+
+fn is_star(token: &GlobToken) -> bool {
+    matches!(token, GlobToken::Star | GlobToken::GlobStar)
+}
+
+fn match_tokens(tokens: &[GlobToken], text: &[char]) -> bool {
+    let mut ti = 0;
+    let mut si = 0;
+    let mut star_ti: Option<usize> = None;
+    let mut star_si = 0;
+
+    while si < text.len() {
+        if ti < tokens.len() && !is_star(&tokens[ti]) && char_matches(&tokens[ti], text[si]) {
+            ti += 1;
+            si += 1;
+        } else if ti < tokens.len() && is_star(&tokens[ti]) {
+            star_ti = Some(ti);
+            star_si = si;
+            ti += 1;
+        } else if let Some(sti) = star_ti {
+            // the star gives up one more character to the wildcard and we
+            // retry matching from just after it
+            if !star_accepts(&tokens[sti], text[star_si]) {
+                return false;
+            }
+            star_si += 1;
+            si = star_si;
+            ti = sti + 1;
+        } else {
+            return false;
+        }
+    }
+
+    while ti < tokens.len() && is_star(&tokens[ti]) {
+        ti += 1;
+    }
+    ti == tokens.len()
+}
+
+/// Check whether `candidate` matches the glob `pattern`, using the same
+/// syntax `glob_to_regex` understands (`*`, `**`, `?`, `[...]`, `\x`).
+///
+/// This matches directly against the parsed glob rather than compiling to
+/// a regex first, since there is no regex engine in the standard library
+/// to run the compiled pattern against.
+pub fn glob_match(pattern: &str, candidate: &str) -> bool {
+    let tokens = parse_glob(pattern);
+    let text: Vec<char> = candidate.chars().collect();
+    match_tokens(&tokens, &text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +398,52 @@ mod tests {
     #[test]
     fn rejects_alternation() {
         assert!(regex_to_glob("^(a|b)$").is_err());
+    }
+
+    #[test]
+    fn match_simple_star() {
+        assert!(glob_match("*.txt", "report.txt"));
+        assert!(!glob_match("*.txt", "report.csv"));
+    }
+
+    #[test]
+    fn match_star_excludes_slash() {
+        assert!(!glob_match("*.log", "logs/a.log"));
+    }
+
+    #[test]
+    fn match_globstar_crosses_slash() {
+        assert!(glob_match("logs/**/*.log", "logs/2024/01/a.log"));
+        assert!(glob_match("logs/**/*.log", "logs/a.log"));
+    }
+
+    #[test]
+    fn match_question_mark() {
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "ac"));
+    }
+
+    #[test]
+    fn match_char_class() {
+        assert!(glob_match("report-[0-9][0-9].csv", "report-42.csv"));
+        assert!(!glob_match("report-[0-9][0-9].csv", "report-4a.csv"));
+    }
+
+    #[test]
+    fn match_negated_class() {
+        assert!(glob_match("backup-[!0-9]*.tar.gz", "backup-x.tar.gz"));
+        assert!(!glob_match("backup-[!0-9]*.tar.gz", "backup-9.tar.gz"));
+    }
+
+    #[test]
+    fn match_escaped_literal() {
+        assert!(glob_match("\\*.txt", "*.txt"));
+        assert!(!glob_match("\\*.txt", "a.txt"));
+    }
+
+    #[test]
+    fn match_requires_full_string() {
+        assert!(!glob_match("*.txt", "report.txt.bak"));
+        assert!(!glob_match("report", "report.txt"));
     }
 }

@@ -7,9 +7,11 @@ use std::process::ExitCode;
 fn usage(prog: &str) -> String {
     format!(
         "usage:\n  {prog} to-regex <glob-pattern>\n  {prog} to-glob <regex-pattern>\n  \
+         {prog} test <glob-pattern> <sample-string>\n  \
          {prog} to-regex  (reads patterns from stdin, one per line)\n  \
          {prog} to-glob   (reads patterns from stdin, one per line)\n\n\
-         examples:\n  {prog} to-regex '*.txt'\n  {prog} to-glob '^.*\\.txt$'",
+         examples:\n  {prog} to-regex '*.txt'\n  {prog} to-glob '^.*\\.txt$'\n  \
+         {prog} test '*.txt' report.txt",
         prog = prog
     )
 }
@@ -90,6 +92,22 @@ fn main() -> ExitCode {
                     eprintln!("error: {}", e);
                     ExitCode::FAILURE
                 }
+            }
+        }
+        4 => {
+            let mode = args[1].as_str();
+            if mode != "test" {
+                eprintln!("{}", usage(&prog));
+                return ExitCode::FAILURE;
+            }
+            let pattern = &args[2];
+            let sample = &args[3];
+            if convert::glob_match(pattern, sample) {
+                println!("match");
+                ExitCode::SUCCESS
+            } else {
+                println!("no match");
+                ExitCode::FAILURE
             }
         }
         _ => {

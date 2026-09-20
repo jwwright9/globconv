@@ -51,6 +51,25 @@ nothing else — no repetition counts, no groups, no alternation. If a
 regex uses one of those, there is no glob that means the same thing,
 and the tool says so instead of returning something approximate.
 
+Check a glob pattern against a sample string directly, without going
+through the regex conversion:
+
+```
+$ globconv test '*.txt' report.txt
+match
+
+$ globconv test 'logs/**/*.log' logs/2024/01/a.log
+match
+
+$ globconv test '*.log' logs/a.log
+no match
+```
+
+`test` exits with status 0 on a match and 1 otherwise, so it works as
+a condition in scripts. It matches directly against the glob syntax
+rather than compiling to regex first — there's no regex engine in
+the standard library to run a compiled pattern against.
+
 ## Batch mode
 
 Leave off the pattern argument and it reads patterns from stdin, one
@@ -83,7 +102,6 @@ and folds them back into `*` and `**` respectively.
 
 ## Roadmap
 
-- a `--test <path>` flag to check a glob/regex against a sample string
 - brace expansion (`{a,b,c}`)
 - integration tests that exercise the built binary directly
 
