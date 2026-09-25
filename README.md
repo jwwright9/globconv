@@ -32,6 +32,9 @@ $ globconv to-regex 'backup-[!0-9]*.tar.gz'
 
 $ globconv to-regex 'logs/**/*.log'
 ^logs/.*/[^/]*\.log$
+
+$ globconv to-regex 'file.{txt,log,bak}'
+^(?:file\.txt|file\.log|file\.bak)$
 ```
 
 Convert a regex back to a glob, when the regex is simple enough to
@@ -63,6 +66,9 @@ match
 
 $ globconv test '*.log' logs/a.log
 no match
+
+$ globconv test 'archive.{tar.gz,zip}' archive.zip
+match
 ```
 
 `test` exits with status 0 on a match and 1 otherwise, so it works as
@@ -95,14 +101,20 @@ Glob syntax understood by `to-regex`:
   directory separators (`logs/**/*.log` matches `logs/2024/01/a.log`)
 - `?` — any single character
 - `[abc]`, `[a-z]`, `[!abc]` — character classes and negation
+- `{a,b,c}` — brace alternatives, expanded the way a shell would
+  before the rest of the pattern is interpreted (so `{a,{b,c}}`
+  nests, and a brace with no comma in it, like `{1}`, is left as a
+  literal instead of being treated as a group)
 - `\x` — escape a character so it's matched literally
 
 `to-glob` recognizes the regex these compile to (`[^/]*` and `.*`)
-and folds them back into `*` and `**` respectively.
+and folds them back into `*` and `**` respectively. It does not fold
+an alternation like `(?:a|b)` back into `{a,b}` — same as any other
+group or alternation, there's no glob equivalent as far as `to-glob`
+is concerned, only the reverse direction expands braces.
 
 ## Roadmap
 
-- brace expansion (`{a,b,c}`)
 - integration tests that exercise the built binary directly
 
 ## License

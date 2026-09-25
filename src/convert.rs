@@ -4,6 +4,148 @@
 // glob -> regex is total, regex -> glob rejects anything that doesn't
 // have a clean glob equivalent instead of guessing.
 
+/// Expand brace alternatives (`{a,b,c}`) in a glob pattern into the set
+/// of concrete patterns they stand for, the same way a shell expands
+/// them before pathname matching happens.
+///
+/// A brace group only expands if it contains a comma at its own
+/// nesting depth; `{a,b}` becomes `a` and `b`, but a lone `{abc}` with
+/// no comma is left untouched, braces and all, matching shell
+/// behavior. Groups can nest (`{a,{b,c}}` yields `a`, `b`, `c`), and a
+/// backslash protects the character after it from being read as brace
+/// syntax. An unterminated `{` is treated as a literal character.
+///
+/// Every other function in this module operates on a single pattern
+/// with no braces in it, so callers that want brace support expand
+/// first and then convert or match each result.
+pub fn expand_braces(pattern: &str) -> Vec<String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    expand_braces_chars(&chars)
+}
+
+fn expand_braces_chars(chars: &[char]) -> Vec<String> {
+    match find_expandable_group(chars) {
+        None => vec![chars.iter().collect()],
+        Some((open, close)) => {
+            let prefix: String = chars[..open].iter().collect();
+            let mut middles = Vec::new();
+            for alt in split_top_level(chars, open + 1, close) {
+                let alt_chars: Vec<char> = alt.chars().collect();
+                middles.extend(expand_braces_chars(&alt_chars));
+            }
+            let suffixes = expand_braces_chars(&chars[close + 1..]);
+            let mut result = Vec::with_capacity(middles.len() * suffixes.len());
+            for m in &middles {
+                for s in &suffixes {
+                    result.push(format!("{}{}{}", prefix, m, s));
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Find the first `{...}` group (skipping past ones with no top-level
+/// comma, since those aren't real alternatives) and return its open
+/// and close indices.
+fn find_expandable_group(chars: &[char]) -> Option<(usize, usize)> {
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '{' => match matching_brace(chars, i) {
+                Some(close) => {
+                    if has_top_level_comma(chars, i + 1, close) {
+                        return Some((i, close));
+                    }
+                    i = close + 1;
+                }
+                // no matching '}' anywhere ahead: this '{' is a literal
+                // character, so leave it behind and keep looking
+                None => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Find the `}` matching the `{` at `open`, respecting nesting and
+/// backslash escapes.
+fn matching_brace(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '{' => {
+                depth += 1;
+                i += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn has_top_level_comma(chars: &[char], start: usize, end: usize) -> bool {
+    let mut depth = 0;
+    let mut i = start;
+    while i < end {
+        match chars[i] {
+            '\\' => i += 2,
+            '{' => {
+                depth += 1;
+                i += 1;
+            }
+            '}' => {
+                depth -= 1;
+                i += 1;
+            }
+            ',' if depth == 0 => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Split the content of a brace group on its top-level commas, leaving
+/// commas inside nested groups alone.
+fn split_top_level(chars: &[char], start: usize, end: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut part_start = start;
+    let mut i = start;
+    while i < end {
+        match chars[i] {
+            '\\' => i += 2,
+            '{' => {
+                depth += 1;
+                i += 1;
+            }
+            '}' => {
+                depth -= 1;
+                i += 1;
+            }
+            ',' if depth == 0 => {
+                parts.push(chars[part_start..i].iter().collect());
+                i += 1;
+                part_start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    parts.push(chars[part_start..end].iter().collect());
+    parts
+}
+
 fn regex_escape(c: char) -> String {
     match c {
         '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' => {
@@ -21,10 +163,23 @@ fn regex_escape(c: char) -> String {
 /// Supported syntax: `*` (any run of characters except `/`), `**` (any
 /// run of characters, including `/`, for matching across path
 /// segments), `?` (any single character), `[abc]` / `[!abc]` character
-/// classes, and `\` to escape the next character literally.
+/// classes, `{a,b,c}` brace alternatives (see [`expand_braces`]), and
+/// `\` to escape the next character literally.
 pub fn glob_to_regex(pattern: &str) -> String {
+    let branches = expand_braces(pattern);
+    if branches.len() == 1 {
+        format!("^{}$", glob_body_to_regex(&branches[0]))
+    } else {
+        let bodies: Vec<String> = branches.iter().map(|b| glob_body_to_regex(b)).collect();
+        format!("^(?:{})$", bodies.join("|"))
+    }
+}
+
+/// Convert a single, brace-free glob pattern into the body of a regex
+/// (no `^`/`$` anchors, so callers can wrap it in an alternation).
+fn glob_body_to_regex(pattern: &str) -> String {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut out = String::from("^");
+    let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
@@ -86,7 +241,6 @@ pub fn glob_to_regex(pattern: &str) -> String {
         }
         i += 1;
     }
-    out.push('$');
     out
 }
 
@@ -322,15 +476,18 @@ fn match_tokens(tokens: &[GlobToken], text: &[char]) -> bool {
 }
 
 /// Check whether `candidate` matches the glob `pattern`, using the same
-/// syntax `glob_to_regex` understands (`*`, `**`, `?`, `[...]`, `\x`).
+/// syntax `glob_to_regex` understands (`*`, `**`, `?`, `[...]`, `{...}`,
+/// `\x`).
 ///
 /// This matches directly against the parsed glob rather than compiling to
 /// a regex first, since there is no regex engine in the standard library
-/// to run the compiled pattern against.
+/// to run the compiled pattern against. Brace groups are expanded up
+/// front and the candidate is checked against each resulting branch.
 pub fn glob_match(pattern: &str, candidate: &str) -> bool {
-    let tokens = parse_glob(pattern);
     let text: Vec<char> = candidate.chars().collect();
-    match_tokens(&tokens, &text)
+    expand_braces(pattern)
+        .iter()
+        .any(|branch| match_tokens(&parse_glob(branch), &text))
 }
 
 #[cfg(test)]
@@ -445,5 +602,75 @@ mod tests {
     fn match_requires_full_string() {
         assert!(!glob_match("*.txt", "report.txt.bak"));
         assert!(!glob_match("report", "report.txt"));
+    }
+
+    #[test]
+    fn brace_expands_simple_alternatives() {
+        assert_eq!(expand_braces("file.{txt,log}"), vec!["file.txt", "file.log"]);
+    }
+
+    #[test]
+    fn brace_no_comma_is_left_literal() {
+        assert_eq!(expand_braces("file{1}.txt"), vec!["file{1}.txt"]);
+    }
+
+    #[test]
+    fn brace_unterminated_is_left_literal() {
+        assert_eq!(expand_braces("file{txt"), vec!["file{txt"]);
+    }
+
+    #[test]
+    fn brace_unterminated_does_not_block_a_later_group() {
+        let mut got = expand_braces("a{b{c,d}");
+        got.sort();
+        assert_eq!(got, vec!["a{bc", "a{bd"]);
+    }
+
+    #[test]
+    fn brace_allows_empty_alternative() {
+        assert_eq!(expand_braces("file{,.bak}"), vec!["file", "file.bak"]);
+    }
+
+    #[test]
+    fn brace_nests() {
+        let mut got = expand_braces("{a,{b,c}d}");
+        got.sort();
+        assert_eq!(got, vec!["a", "bd", "cd"]);
+    }
+
+    #[test]
+    fn brace_multiple_groups_cross_product() {
+        let mut got = expand_braces("{a,b}-{1,2}");
+        got.sort();
+        assert_eq!(got, vec!["a-1", "a-2", "b-1", "b-2"]);
+    }
+
+    #[test]
+    fn brace_escaped_is_left_literal() {
+        assert_eq!(expand_braces("file\\{a,b\\}.txt"), vec!["file\\{a,b\\}.txt"]);
+    }
+
+    #[test]
+    fn glob_to_regex_expands_braces() {
+        assert_eq!(glob_to_regex("*.{txt,log}"), "^(?:[^/]*\\.txt|[^/]*\\.log)$");
+    }
+
+    #[test]
+    fn glob_to_regex_single_branch_has_no_group() {
+        assert_eq!(glob_to_regex("file{1}.txt"), "^file\\{1\\}\\.txt$");
+    }
+
+    #[test]
+    fn match_brace_alternatives() {
+        assert!(glob_match("*.{txt,log}", "report.txt"));
+        assert!(glob_match("*.{txt,log}", "report.log"));
+        assert!(!glob_match("*.{txt,log}", "report.csv"));
+    }
+
+    #[test]
+    fn match_nested_brace_alternatives() {
+        assert!(glob_match("file.{a,{b,c}}", "file.b"));
+        assert!(glob_match("file.{a,{b,c}}", "file.c"));
+        assert!(!glob_match("file.{a,{b,c}}", "file.d"));
     }
 }
